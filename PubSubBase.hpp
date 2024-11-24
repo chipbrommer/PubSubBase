@@ -123,7 +123,7 @@ public:
     }
 
     // Method to send messages (used only in PUBLISH mode)
-    bool SendMessage(std::string_view topic, std::string_view message)
+    [[nodiscard]] bool SendMessage(std::string_view topic, std::string_view message)
     {
         std::scoped_lock lock(m_PubMutex);
         if (!m_PubSocket)
@@ -156,7 +156,7 @@ public:
         return false;
     }
 
-    bool SendMessageWithRetry(std::string_view topic, std::string_view message, int retries = 3)
+    [[nodiscard]] bool SendMessageWithRetry(std::string_view topic, std::string_view message, int retries = 3)
     {
         while (retries-- > 0)
         {
@@ -170,7 +170,7 @@ public:
     }
 
     // Method to receive messages (used only in SUBSCRIBE mode)
-    bool ReceiveMessage(std::string& topic, std::string& message, bool blocking = false)
+    [[nodiscard]] bool ReceiveMessage(std::string& topic, std::string& message, bool blocking = false)
     {
         std::scoped_lock lock(m_SubMutex);
         if (!m_SubSocket)
@@ -200,7 +200,7 @@ public:
         return false;
     }
 
-    void ResetPublisherSocket()
+    bool ResetPublisherSocket()
     {
         std::scoped_lock lock(m_PubMutex);
         if (m_PubSocket)
@@ -208,10 +208,10 @@ public:
             m_PubSocket->close();
             LogInfo("Publisher socket reset");
         }
-        InitializePublisherSocket();
+        return InitializePublisherSocket();
     }
 
-    void ResetSubscriberSocket()
+    bool ResetSubscriberSocket()
     {
         std::scoped_lock lock(m_SubMutex);
         if (m_SubSocket)
@@ -219,7 +219,7 @@ public:
             m_SubSocket->close();
             LogInfo("Subscriber socket reset");
         }
-        InitializeSubscriberSocket();
+        return InitializeSubscriberSocket();
     }
 
     // Set or update the error handler callback
@@ -235,6 +235,32 @@ public:
     }
 
 private:
+    std::vector<uint8_t> EncodeMessage(std::string_view topic, std::string_view message)
+    {
+        std::string combined = std::string(topic) + ":" + std::string(message);
+        return { combined.begin(), combined.end() };
+    }
+
+    std::pair<std::string, std::string> DecodeMessage(const std::vector<uint8_t>& encodedMessage)
+    {
+        // Convert the vector to a string
+        std::string combined(encodedMessage.begin(), encodedMessage.end());
+
+        // Find the delimiter (e.g., ':')
+        size_t delimiterPos = combined.find(':');
+        if (delimiterPos == std::string::npos) 
+        {
+            // Return empty strings on invalid format
+            return {};
+        }
+
+        // Split the string into topic and message
+        std::string topic = combined.substr(0, delimiterPos);
+        std::string message = combined.substr(delimiterPos + 1);
+
+        return { topic, message };
+    }
+
     void LogError(const std::string& errorMessage) 
     {
         if (m_ErrorHandler) 
@@ -269,24 +295,27 @@ private:
             return false;
         }
 
-        if (m_Mode == Mode::PUBLISH || m_Mode == Mode::PUBLISH_AND_SUBSCRIBE)
+        if (m_Mode != Mode::PUBLISH && m_Mode != Mode::PUBLISH_AND_SUBSCRIBE)
         {
-            std::scoped_lock lock(m_PubMutex);
-            try
+            LogError("Attempt to initialize publisher in unsupported mode");
+            return false;
+        }
+
+        std::scoped_lock lock(m_PubMutex);
+        try
+        {
+            // Only create the socket if it isn't already initialized
+            if (!m_PubSocket)
             {
-                // Only create the socket if it isn't already initialized
-                if (!m_PubSocket)
-                {
-                    m_PubSocket = std::make_unique<zmq::socket_t>(*m_Context, ZMQ_PUB);
-                }
-                m_PubSocket->bind(m_PubEndpoint);
-                LogInfo("Publisher socket initialized and bound to: " + m_PubEndpoint);
-                return true;
+                m_PubSocket = std::make_unique<zmq::socket_t>(*m_Context, ZMQ_PUB);
             }
-            catch (const zmq::error_t& e)
-            {
-                LogError("Failed to initialize publisher socket in mode " + std::to_string(static_cast<int>(m_Mode)) + ": " + std::string(e.what()));
-            }
+            m_PubSocket->bind(m_PubEndpoint);
+            LogInfo("Publisher socket initialized and bound to: " + m_PubEndpoint);
+            return true;
+        }
+        catch (const zmq::error_t& e)
+        {
+            LogError("Failed to initialize publisher socket in mode " + std::to_string(static_cast<int>(m_Mode)) + ": " + std::string(e.what()));
         }
 
         return false;
@@ -306,26 +335,29 @@ private:
             return false;
         }
 
-        if (m_Mode == Mode::SUBSCRIBE || m_Mode == Mode::PUBLISH_AND_SUBSCRIBE)
+        if (m_Mode != Mode::SUBSCRIBE && m_Mode != Mode::PUBLISH_AND_SUBSCRIBE)
         {
-            try
-            {
-                // Only create the socket if it isn't already initialized
-                if (!m_SubSocket)
-                {
-                    m_SubSocket = std::make_unique<zmq::socket_t>(*m_Context, ZMQ_SUB);
-                }
-                m_SubSocket->connect(m_SubEndpoint);
+            LogError("Attempt to initialize subscriber in unsupported mode");
+            return false;
+        }
 
-                // Subscribe to all messages by default
-                m_SubSocket->set(zmq::sockopt::subscribe, "");
-                LogInfo("Subscriber socket initialized and connected to: " + m_SubEndpoint);
-                return true;
-            }
-            catch (const zmq::error_t& e)
+        try
+        {
+            // Only create the socket if it isn't already initialized
+            if (!m_SubSocket)
             {
-                LogError("Failed to initialize subscriber socket in mode " + std::to_string(static_cast<int>(m_Mode)) + ": " + std::string(e.what()));
+                m_SubSocket = std::make_unique<zmq::socket_t>(*m_Context, ZMQ_SUB);
             }
+            m_SubSocket->connect(m_SubEndpoint);
+
+            // Subscribe to all messages by default
+            m_SubSocket->set(zmq::sockopt::subscribe, "");
+            LogInfo("Subscriber socket initialized and connected to: " + m_SubEndpoint);
+            return true;
+        }
+        catch (const zmq::error_t& e)
+        {
+            LogError("Failed to initialize subscriber socket in mode " + std::to_string(static_cast<int>(m_Mode)) + ": " + std::string(e.what()));
         }
 
         return false;
