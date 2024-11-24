@@ -10,10 +10,19 @@
 class PubSubBase 
 {
 public:
+    /// @brief Available modes for the class functionality
     enum class Mode { PUBLISH, SUBSCRIBE, PUBLISH_AND_SUBSCRIBE};
 
+    /// @brief Convenience definition for a std::function used for logging
     using LogHandler = std::function<void(const std::string&)>;
 
+    /// @brief Default Constructor
+    /// @param mode - Mode for the class instance
+    /// @param pubEndpoint - publisher endpoint
+    /// @param subEndpoint - opt - subscriber endpoint
+    /// @param errorHandler - opt - std::function or lambda to be used as a callback for error messages
+    /// @param infoHandler - opt - std::function or lambda to be used as a callback for info messages
+    /// @param context - opt - pointer to a shared context or nullptr to have class create its own. 
     PubSubBase(Mode mode, const std::string& pubEndpoint, const std::string& subEndpoint = "",
         LogHandler errorHandler = [](const std::string&) {},
         LogHandler infoHandler = [](const std::string&) {},
@@ -22,10 +31,21 @@ public:
         m_ErrorHandler(std::move(errorHandler)), m_InfoHandler(std::move(infoHandler))
     {
         InitializeContext(context);
-        InitializePublisherSocket();
-        InitializeSubscriberSocket();
+
+        if (m_Mode == Mode::PUBLISH || m_Mode == Mode::PUBLISH_AND_SUBSCRIBE)
+        {
+
+            InitializePublisherSocket();
+        }
+
+        if (m_Mode == Mode::SUBSCRIBE || m_Mode == Mode::PUBLISH_AND_SUBSCRIBE)
+        {
+
+            InitializeSubscriberSocket();
+        }
     }
 
+    /// @brief Default deconstructor
     ~PubSubBase() 
     {
         CloseSockets();
@@ -36,17 +56,13 @@ public:
     PubSubBase(PubSubBase&&) = delete;
     PubSubBase& operator=(PubSubBase&&) = delete;
 
-    bool IsValid() const 
-    {
-        return !m_PubEndpoint.empty() && (m_Mode == Mode::PUBLISH || !m_SubEndpoint.empty());
-    }
-
+    /// @brief Updates the classes ZMQ context
+    /// @param context - Pointer to a pre-existing ZMQ context or pass in nullptr to have class create its own context. 
     void SetContext(std::shared_ptr<zmq::context_t> context)
     {
         // If the existing context is owned, release it
         if (m_OwnContext && m_Context)
         {
-
             CloseSockets();
         }
 
@@ -58,7 +74,8 @@ public:
         ResetSubscriberSocket();
     }
 
-    // Updates the subscribed to topics
+    /// @brief Adds a specific topic to the subscribed list
+    /// @param topic - topic to be subscribed to
     void AddSubscribedTopic(std::string_view topic)
     {
         std::scoped_lock lock(m_SubMutex);
@@ -80,6 +97,8 @@ public:
         }
     }
 
+    /// @brief Unsubscribe from a specific topic
+    /// @param topic - topic to be unsubscribed from
     void UnsubscribeFromTopic(std::string_view topic)
     {
         std::scoped_lock lock(m_SubMutex);
@@ -101,6 +120,7 @@ public:
         }
     }
 
+    /// @brief Will clear all subscribed topics.
     void ClearSubscribedTopics()
     {
         std::scoped_lock lock(m_SubMutex);
@@ -122,7 +142,10 @@ public:
         }
     }
 
-    // Method to send messages (used only in PUBLISH mode)
+    /// @brief Sends message (used only in PUBLISH mode)
+    /// @param topic - topic for the message being sent
+    /// @param message - message to be trasmitted
+    /// @return true on successful send, else false. 
     [[nodiscard]] bool SendMessage(std::string_view topic, std::string_view message)
     {
         std::scoped_lock lock(m_PubMutex);
@@ -156,6 +179,11 @@ public:
         return false;
     }
 
+    /// @brief Send messages with a retry counter (used only in PUBLISH mode)
+    /// @param topic - topic for the message being sent
+    /// @param message - message to be trasmitted
+    /// @param retries - opt - number of retry attempts. Defaults to 3.
+    /// @return true on successful send, else false. 
     [[nodiscard]] bool SendMessageWithRetry(std::string_view topic, std::string_view message, int retries = 3)
     {
         while (retries-- > 0)
@@ -169,7 +197,11 @@ public:
         return false;
     }
 
-    // Method to receive messages (used only in SUBSCRIBE mode)
+    /// @brief Used to receive messages from the set endpoint (used only in SUBSCRIBE mode)
+    /// @param topic - out - received topic
+    /// @param message - out - received message 
+    /// @param blocking - in / opt - true will block and wait for message, false by default for instant return
+    /// @return true on successful read regardless of received data, else false. 
     [[nodiscard]] bool ReceiveMessage(std::string& topic, std::string& message, bool blocking = false)
     {
         std::scoped_lock lock(m_SubMutex);
@@ -200,6 +232,8 @@ public:
         return false;
     }
 
+    /// @brief Resets the publisher socket 
+    /// @return true if success, else false. If mode is not set as a PUBLISHER or PUBLISH_AND_SUBSCRIBE, will return false. 
     bool ResetPublisherSocket()
     {
         std::scoped_lock lock(m_PubMutex);
@@ -211,6 +245,8 @@ public:
         return InitializePublisherSocket();
     }
 
+    /// @brief Resets the subscriber socket 
+    /// @return true if success, else false. If mode is not set as a SUBSCRIBER or PUBLISH_AND_SUBSCRIBE, will return false. 
     bool ResetSubscriberSocket()
     {
         std::scoped_lock lock(m_SubMutex);
@@ -222,25 +258,34 @@ public:
         return InitializeSubscriberSocket();
     }
 
-    // Set or update the error handler callback
+    /// @brief Set or update the error handler callback
+    /// @param handler std::function or lambda to be used as a callback
     void SetErrorLogHandler(LogHandler handler)
     {
         m_ErrorHandler = std::move(handler);
     }
 
-    // Set or update the error handler callback
+    /// @brief Set or update the info handler callback
+    /// @param handler std::function or lambda to be used as a callback
     void SetInfoLogHandler(LogHandler handler)
     {
         m_InfoHandler = std::move(handler);
     }
 
 private:
+    /// @brief Encodes a topic and message into a single message for transmition.
+    /// @param topic - topic for the message
+    /// @param message - message to be sent
+    /// @return - Encoded message as a uint8_t vector
     std::vector<uint8_t> EncodeMessage(std::string_view topic, std::string_view message)
     {
         std::string combined = std::string(topic) + ":" + std::string(message);
         return { combined.begin(), combined.end() };
     }
 
+    /// @brief Decodes a received message from the subscriber socket. 
+    /// @param encodedMessage received encoded message
+    /// @return topic, message pair
     std::pair<std::string, std::string> DecodeMessage(const std::vector<uint8_t>& encodedMessage)
     {
         // Convert the vector to a string
@@ -261,6 +306,8 @@ private:
         return { topic, message };
     }
 
+    /// @brief Logs an error message. By default, prints to std::cerr if user has not passed in a callback 
+    /// @param message - Message to be logged
     void LogError(const std::string& errorMessage) 
     {
         if (m_ErrorHandler) 
@@ -273,6 +320,8 @@ private:
         }
     }
 
+    /// @brief Logs an info message. By default, will not print anything. Relies on user passed callback. 
+    /// @param message - Message to be logged
     void LogInfo(const std::string& message)
     {
         if (m_InfoHandler)
@@ -281,6 +330,8 @@ private:
         }
     }
 
+    /// @brief Initialzies the punlisher socket for the class
+    /// @return true on success, else false
     bool InitializePublisherSocket()
     {
         if (m_PubEndpoint.empty())
@@ -321,6 +372,8 @@ private:
         return false;
     }
 
+    /// @brief Initialzies the subscriber socket for the class
+    /// @return true on success, else false
     bool InitializeSubscriberSocket()
     {
         if (m_SubEndpoint.empty())
@@ -363,6 +416,8 @@ private:
         return false;
     }
 
+    /// @brief Close the sockets that are open. 
+    /// @brief will also close the context if it is owned by the class. 
     void CloseSockets() 
     {
         try 
@@ -392,6 +447,8 @@ private:
         }
     }
 
+    /// @brief Initialize the context
+    /// @param context - nullptr will tell class to create and handle its own context, passing in a context is also handled for abstract handling.
     void InitializeContext(std::shared_ptr<zmq::context_t> context)
     {
         if (!context)
