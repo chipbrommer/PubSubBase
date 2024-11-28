@@ -1,8 +1,28 @@
-﻿
+﻿#include <array>
 #include <iostream>
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include "PubSubBase.hpp"
+
+#pragma pack(push,1)
+struct msg
+{
+    uint8_t sync1 = 1;
+    uint8_t sync2 = 2;
+    uint32_t counter = 0;
+    uint8_t eob = 3;
+
+    static constexpr std::size_t msgSize =
+        sizeof(sync1) + sizeof(sync2) + sizeof(counter) + sizeof(eob);
+
+    std::array<uint8_t, msgSize> toArray() const
+    {
+        std::array<uint8_t, msgSize> arr{};
+        std::memcpy(arr.data(), this, msgSize);
+        return arr;
+    }
+};
+#pragma pack(pop)
 
 int main()
 {
@@ -24,13 +44,15 @@ int main()
         [logger](const std::string& message) { logger->info(message); }
     );
 
+    msg message{};
+
     // Main loop to send messages
     while (true)
     {
-        static int msgCounter = 0;
-        if (pub.SendMessage("test", "Count = " + std::to_string(msgCounter)))
+        auto messageArray = message.toArray();
+        if (pub.SendMessage("test", messageArray, messageArray.size()))
         {
-            msgCounter++;
+            message.counter++;
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
