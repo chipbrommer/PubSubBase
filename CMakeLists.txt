@@ -11,15 +11,8 @@ set(CMAKE_TOOLCHAIN_FILE "${CMAKE_CURRENT_LIST_DIR}/vcpkg/scripts/buildsystems/v
 
 # Find the ZeroMQ and cppzmq package
 find_package(cppzmq CONFIG REQUIRED)
-find_package(spdlog REQUIRED)
 
-# Add source to this project's executable.
-add_executable (
-    PubSubBase 
-    "main.cpp" 
-    "PubSubBase.hpp"
-)
+add_subdirectory(example)
 
 # Link cppzmq (this will link libzmq transitively)
 target_link_libraries(PubSubBase PRIVATE cppzmq)
-target_link_libraries(PubSubBase PRIVATE spdlog::spdlog)

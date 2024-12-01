@@ -26,29 +26,41 @@ public:
 
     /// @brief Default Constructor
     /// @param mode - Mode for the class instance
-    /// @param pubEndpoint - publisher endpoint
-    /// @param subEndpoint - opt - subscriber endpoint
+    /// @param pubEndpoint - vector of endpoints for the publisher
+    /// @param subEndpoint - opt - vector of endpoints for the subscriber
     /// @param errorHandler - opt - std::function or lambda to be used as a callback for error messages
     /// @param infoHandler - opt - std::function or lambda to be used as a callback for info messages
     /// @param context - opt - pointer to a shared context or nullptr to have class create its own. 
-    PubSubBase(Mode mode, const std::string& pubEndpoint, const std::string& subEndpoint = "",
+    PubSubBase(Mode mode,
+        const std::vector<std::string>& pubEndpoints = {},
+        const std::vector<std::string>& subEndpoints = {},
         LogHandler errorHandler = [](const std::string&) {},
         LogHandler infoHandler = [](const std::string&) {},
         std::shared_ptr<zmq::context_t> context = nullptr)
-        : m_Mode(mode), m_PubEndpoint(pubEndpoint), m_SubEndpoint(subEndpoint),
-        m_ErrorHandler(std::move(errorHandler)), m_InfoHandler(std::move(infoHandler))
+        : m_Mode(mode),
+        m_ErrorHandler(std::move(errorHandler)),
+        m_InfoHandler(std::move(infoHandler))
     {
         InitializeContext(context);
 
+        // Intentionally handle endpoints one by one so we can check for duplicates
+        for (const auto& endpoint : pubEndpoints)
+        {
+            AddPublisherEndpoint(endpoint);
+        }
+
+        for (const auto& endpoint : subEndpoints)
+        {
+            AddSubscriberEndpoint(endpoint);
+        }
+
         if (m_Mode == Mode::PUBLISH || m_Mode == Mode::PUBLISH_AND_SUBSCRIBE)
         {
-
             InitializePublisherSocket();
         }
 
         if (m_Mode == Mode::SUBSCRIBE || m_Mode == Mode::PUBLISH_AND_SUBSCRIBE)
         {
-
             InitializeSubscriberSocket();
         }
     }
@@ -220,15 +232,15 @@ public:
     /// @param topic - out - received topic as an std::string
     /// @param message - out - received message as a std::array<uint8_t, N>
     /// @param blocking - in / opt - true will block and wait for message, false by default for instant return
-    /// @return true on successful read regardless of received data, else false.
+    /// @return number bytes read on successful read, else -1.
     template <std::size_t N>
-    [[nodiscard]] bool ReceiveMessage(std::string& topic, std::array<uint8_t, N>& message, bool blocking = false)
+    [[nodiscard]] int ReceiveMessage(std::string& topic, std::array<uint8_t, N>& message, bool blocking = false)
     {
         std::scoped_lock lock(m_SubMutex);
         if (!m_SubSocket)
         {
             LogError("ReceiveMessage() called but no subscriber socket initialized");
-            return false;
+            return -1;
         }
 
         try
@@ -245,7 +257,7 @@ public:
                 if (data_msg.size() > N)
                 {
                     LogError("Received message size exceeds std::array capacity");
-                    return false;
+                    return -1;
                 }
 
                 // Copy data into the std::array
@@ -257,7 +269,7 @@ public:
                     std::fill(message.begin() + data_msg.size(), message.end(), 0);
                 }
 
-                return true;
+                return data_msg.size();
             }
         }
         catch (const zmq::error_t& e)
@@ -265,7 +277,123 @@ public:
             LogError("Error receiving message: " + std::string(e.what()));
         }
 
-        return false;
+        return -1;
+    }
+
+    /// @brief Adds a publisher endpoint.
+    /// @param endpoint - The endpoint to bind to.
+    void AddPublisherEndpoint(const std::string& endpoint)
+    {
+        std::scoped_lock lock(m_PubMutex);
+
+        if (std::find(m_PubEndpoints.begin(), m_PubEndpoints.end(), endpoint) != m_PubEndpoints.end())
+        {
+            m_ErrorHandler("Publisher endpoint already exists: " + endpoint);
+            return;
+        }
+
+        m_PubEndpoints.push_back(endpoint);
+        if (m_PubSocket)
+        {
+            try
+            {
+                m_PubSocket->bind(endpoint);
+                LogInfo("Added publisher endpoint: " + endpoint);
+            }
+            catch (const zmq::error_t& e)
+            {
+                LogError("Failed to bind publisher endpoint: " + endpoint + ". Error: " + std::string(e.what()));
+            }
+        }
+    }
+
+    /// @brief Adds a subscriber endpoint.
+    /// @param endpoint - The endpoint to connect to.
+    void AddSubscriberEndpoint(const std::string& endpoint)
+    {
+        std::scoped_lock lock(m_SubMutex);
+
+        if (std::find(m_SubEndpoints.begin(), m_SubEndpoints.end(), endpoint) != m_SubEndpoints.end())
+        {
+            m_ErrorHandler("Subscriber endpoint already exists: " + endpoint);
+            return;
+        }
+
+        m_SubEndpoints.push_back(endpoint);
+        if (m_SubSocket)
+        {
+            try
+            {
+                m_SubSocket->connect(endpoint);
+                LogInfo("Added subscriber endpoint: " + endpoint);
+            }
+            catch (const zmq::error_t& e)
+            {
+                LogError("Failed to connect subscriber endpoint: " + endpoint + ". Error: " + std::string(e.what()));
+            }
+        }
+    }
+
+    /// @brief Removes a publisher endpoint.
+    /// @param endpoint - The endpoint to unbind.
+    void RemovePublisherEndpoint(const std::string& endpoint)
+    {
+        std::scoped_lock lock(m_PubMutex);
+
+        // Check if the endpoint exists
+        auto it = std::find(m_PubEndpoints.begin(), m_PubEndpoints.end(), endpoint);
+        if (it != m_PubEndpoints.end())
+        {
+            try
+            {
+                if (m_PubSocket)
+                {
+                    m_PubSocket->unbind(endpoint);
+                    LogInfo("Publisher endpoint unbound: " + endpoint);
+                }
+                // Remove from the list
+                m_PubEndpoints.erase(it);
+            }
+            catch (const zmq::error_t& e)
+            {
+                LogError("Failed to unbind publisher endpoint: " + endpoint + ". Error: " + std::string(e.what()));
+            }
+        }
+        else
+        {
+            LogInfo("Publisher endpoint not found: " + endpoint);
+        }
+    }
+
+    /// @brief Removes a subscriber endpoint.
+    /// @param endpoint - The endpoint to disconnect.
+    void RemoveSubscriberEndpoint(const std::string& endpoint)
+    {
+        std::scoped_lock lock(m_SubMutex);
+
+        // Check if the endpoint exists
+        auto it = std::find(m_SubEndpoints.begin(), m_SubEndpoints.end(), endpoint);
+        if (it != m_SubEndpoints.end())
+        {
+            try
+            {
+                if (m_SubSocket)
+                {
+                    m_SubSocket->disconnect(endpoint);
+                    LogInfo("Subscriber endpoint disconnected: " + endpoint);
+                }
+                // Remove from the list
+                m_SubEndpoints.erase(it);
+            }
+            catch (const zmq::error_t& e)
+            {
+                LogError("Failed to disconnect subscriber endpoint: " + endpoint + ". Error: " + std::string(e.what()));
+            }
+        }
+        else
+        {
+            LogInfo("Subscriber endpoint not found: " + endpoint);
+        }
     }
 
     /// @brief Resets the publisher socket 
@@ -370,9 +498,9 @@ private:
     /// @return true on success, else false
     bool InitializePublisherSocket()
     {
-        if (m_PubEndpoint.empty())
+        if (m_PubEndpoints.empty())
         {
-            LogError("Publisher socket initialization failed, endpoint is empty.");
+            LogError("Publisher socket initialization failed, endpoint list is empty.");
             return false;
         }
 
@@ -396,8 +524,14 @@ private:
             {
                 m_PubSocket = std::make_unique<zmq::socket_t>(*m_Context, ZMQ_PUB);
             }
-            m_PubSocket->bind(m_PubEndpoint);
-            LogInfo("Publisher socket initialized and bound to: " + m_PubEndpoint);
+            
+            for (const auto& endpoint : m_PubEndpoints)
+            {
+                m_PubSocket->bind(endpoint);
+                LogInfo("Publisher bound to endpoint: " + endpoint);
+            }
+
+            LogInfo("Publisher socket initialized");
             return true;
         }
         catch (const zmq::error_t& e)
@@ -412,9 +546,9 @@ private:
     /// @return true on success, else false
     bool InitializeSubscriberSocket()
     {
-        if (m_SubEndpoint.empty())
+        if (m_SubEndpoints.empty())
         {
-            LogError("Subscriber socket initialization failed, endpoint is empty.");
+            LogError("Subscriber socket initialization failed, endpoint list is empty.");
             return false;
         }
 
@@ -437,11 +571,16 @@ private:
             {
                 m_SubSocket = std::make_unique<zmq::socket_t>(*m_Context, ZMQ_SUB);
             }
-            m_SubSocket->connect(m_SubEndpoint);
+
+            for (const auto& endpoint : m_SubEndpoints)
+            {
+                m_SubSocket->connect(endpoint);
+                LogInfo("Subscriber connected to endpoint: " + endpoint);
+            }
 
             // Subscribe to all messages by default
             m_SubSocket->set(zmq::sockopt::subscribe, "");
-            LogInfo("Subscriber socket initialized and connected to: " + m_SubEndpoint);
+            LogInfo("Subscriber socket initialized");
             return true;
         }
         catch (const zmq::error_t& e)
@@ -506,8 +645,8 @@ private:
     std::unique_ptr<zmq::socket_t> m_SubSocket{ nullptr };
     std::mutex m_SubMutex;
     Mode m_Mode;
-    std::string m_PubEndpoint;
-    std::string m_SubEndpoint;
+    std::vector<std::string> m_PubEndpoints;
+    std::vector<std::string> m_SubEndpoints;
     LogHandler m_ErrorHandler{ nullptr };
     LogHandler m_InfoHandler{ nullptr };
 };
