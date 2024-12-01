@@ -7,6 +7,7 @@ add_executable (
     "main.cpp"
     "count_msg.h" 
     "status_msg.h"
+    "info_msg.h"
 )
 
 # Add the parent directory and this one to the include path

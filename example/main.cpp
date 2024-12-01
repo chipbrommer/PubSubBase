@@ -9,6 +9,7 @@
 #include "PubSubBase.hpp"
 #include "count_msg.h"
 #include "status_msg.h"
+#include "info_msg.h"
 
 std::atomic_bool kill{ false };
 
@@ -70,15 +71,15 @@ void client2(std::shared_ptr<spdlog::logger> logger)
     }
 }
 
-void server1(std::shared_ptr<spdlog::logger> logger)
+void client3(std::shared_ptr<spdlog::logger> logger)
 {
-    logger->info("Server 1 started\n");
+    logger->info("Client 3 started\n");
 
     // Create publisher instance
     PubSubBase pub(
-        PubSubBase::Mode::SUBSCRIBE,
-        {"tcp://127.0.0.1:5557"},
-        {"tcp://127.0.0.1:5555", "tcp://127.0.0.1:5556" },
+        PubSubBase::Mode::PUBLISH_AND_SUBSCRIBE,
+        { "tcp://127.0.0.1:5557" },
+        { "tcp://127.0.0.1:5555", "tcp://127.0.0.1:5556" },
         [logger](const std::string& message) { logger->error(message); },
         [logger](const std::string& message) { logger->info(message); }
     );
@@ -88,11 +89,83 @@ void server1(std::shared_ptr<spdlog::logger> logger)
 
     std::string topic;
     std::array<uint8_t, 100> data{ 0 };
+    count_msg cm{};
+    status_msg sm{};
+    info_msg im{};
+    bool newData = false;
+
+    // Main loop to send messages
+    while (!kill)
+    {
+        int read = pub.ReceiveMessage(topic, data.data(), data.size());
+
+        if (read <= 0)
+        {
+            continue;
+        }
+
+        if (topic == "count")
+        {
+            if (read != count_msg::msgSize)
+            {
+                break;
+            }
+
+            cm = count_msg::fromArray(data.data(), read);
+            im.count = cm.count;
+            newData = true;
+        }
+        else if (topic == "status")
+        {
+            if (read != status_msg::msgSize)
+            {
+                break;
+            }
+
+            sm = status_msg::fromArray(data.data(), read);
+            im.status1 = sm.status1;
+            im.status2 = sm.status2;
+            newData = true;
+        }
+
+        if (newData)
+        {
+            auto messageArray = im.toArray();
+            if (!pub.SendMessage("info", messageArray.data(), messageArray.size()))
+            {
+                logger->error("Client 3 failed to send!\n");
+            }
+            newData = false;
+        }
+    
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+void server1(std::shared_ptr<spdlog::logger> logger)
+{
+    logger->info("Server 1 started\n");
+
+    // Create publisher instance
+    PubSubBase pub(
+        PubSubBase::Mode::SUBSCRIBE,
+        {""},
+        {"tcp://127.0.0.1:5555", "tcp://127.0.0.1:5556", "tcp://127.0.0.1:5557"},
+        [logger](const std::string& message) { logger->error(message); },
+        [logger](const std::string& message) { logger->info(message); }
+    );
+
+    pub.AddSubscribedTopic("count");
+    pub.AddSubscribedTopic("status");
+    pub.AddSubscribedTopic("info");
+
+    std::string topic;
+    std::array<uint8_t, 100> data{ 0 };
 
     // Main loop to read messages
     while (!kill)
     {
-        int read = pub.ReceiveMessage(topic, data.data(), data.size());
+        int read = pub.ReceiveMessage(topic, data.data(), data.size(), true);
 
         if (topic == "count")
         {
@@ -105,7 +178,6 @@ void server1(std::shared_ptr<spdlog::logger> logger)
             count_msg cm = count_msg::fromArray(data.data(), read);
             std::cout << "Count: " << cm.count << "\n";
         }
-    
         else if (topic == "status")
         {
             if (read != status_msg::msgSize)
@@ -117,12 +189,26 @@ void server1(std::shared_ptr<spdlog::logger> logger)
             status_msg sm = status_msg::fromArray(data.data(), read);
             std::cout << "Status: " << sm.status1 << " " << sm.status2 << "\n";
         }
+        else if (topic == "info")
+        {
+            if (read != info_msg::msgSize)
+            {
+                logger->info("Invalid 'info' read\n");
+                break;
+            }
+
+            info_msg im = info_msg::fromArray(data.data(), read);
+            std::cout << "Info: " << im.count << " = " << im.status1 << " " << im.status2 << "\n";
+
+            if (im.count >= 100)
+            {
+                kill = true;
+            }
+        }
         else
         {
             logger->info("Unknown topic: " + topic.empty() ? "EMPTY!" : topic + "\n");
         }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
 }
 
@@ -147,23 +233,27 @@ int main()
         {
             client2(logger);
         });
+
+    std::thread c3([logger]()
+        {
+            client3(logger);
+        });
     
     std::thread s1([logger]()
         {
             server1(logger);
         });
 
-    int k = 0;
-    while (k < 100)
+    while (!kill)
     {
-        k++;
-        std::this_thread::sleep_for(std::chrono::seconds(1));
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 
     kill = true;
 
     c1.join();
     c2.join();
+    c3.join();
     s1.join();
 
     return 0;
