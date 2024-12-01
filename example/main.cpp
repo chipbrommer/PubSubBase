@@ -31,7 +31,7 @@ void client1(std::shared_ptr<spdlog::logger> logger)
     while (!kill)
     {
         auto messageArray = message.toArray();
-        if (pub.SendMessage("count", messageArray, messageArray.size()))
+        if (pub.SendMessage("count", messageArray.data(), messageArray.size()))
         {
             message.count++;
         }
@@ -59,7 +59,7 @@ void client2(std::shared_ptr<spdlog::logger> logger)
     while (!kill)
     {
         auto messageArray = message.toArray();
-        if (pub.SendMessage("status", messageArray, messageArray.size()))
+        if (pub.SendMessage("status", messageArray.data(), messageArray.size()))
         {
             // toggle status 1 and have status 2 inverse status 1. 
             message.status1 = message.status1 == 1 ? 0 : 1;
@@ -92,7 +92,7 @@ void server1(std::shared_ptr<spdlog::logger> logger)
     // Main loop to read messages
     while (!kill)
     {
-        int read = pub.ReceiveMessage(topic, data);
+        int read = pub.ReceiveMessage(topic, data.data(), data.size());
 
         if (topic == "count")
         {

@@ -164,11 +164,10 @@ public:
 
     /// @brief Sends message (used only in PUBLISH mode)
     /// @param topic - topic for the message being sent
-    /// @param message - message to be transmitted as a std::array<uint8_t, N>
-    /// @param message_size - the actual size of the data within the array to send
+    /// @param message - pointer to the message data
+    /// @param message_size - the actual size of the data to send
     /// @return true on successful send, else false.
-    template <std::size_t N>
-    [[nodiscard]] bool SendMessage(std::string_view topic, const std::array<uint8_t, N>& message, std::size_t message_size)
+    [[nodiscard]] bool SendMessage(std::string_view topic, const uint8_t* message, std::size_t message_size)
     {
         std::scoped_lock lock(m_PubMutex);
         if (!m_PubSocket)
@@ -183,16 +182,16 @@ public:
             return false;
         }
 
-        if (message_size > N)
+        if (message_size <= 0)
         {
-            LogError("SendMessage() called with message_size exceeding array capacity");
+            LogError("SendMessage() called with an empty message");
             return false;
         }
 
         try
         {
             zmq::message_t topic_msg(topic.data(), topic.size());
-            zmq::message_t data_msg(message.data(), message_size);
+            zmq::message_t data_msg(message, message_size);
 
             m_PubSocket->send(topic_msg, zmq::send_flags::sndmore);
             m_PubSocket->send(data_msg, zmq::send_flags::none);
@@ -209,12 +208,11 @@ public:
 
     /// @brief Send messages with a retry counter (used only in PUBLISH mode)
     /// @param topic - topic for the message being sent
-    /// @param message - message to be transmitted as a std::array<uint8_t, N>
+    /// @param message - pointer to the message data
     /// @param message_size - the actual size of the data within the array to send
     /// @param retries - opt - number of retry attempts. Defaults to 3.
     /// @return true on successful send, else false.
-    template <std::size_t N>
-    [[nodiscard]] bool SendMessageWithRetry(std::string_view topic, const std::array<uint8_t, N>& message,
+    [[nodiscard]] bool SendMessageWithRetry(std::string_view topic, const uint8_t* message,
         std::size_t message_size, int retries = 3)
     {
         while (retries-- > 0)
@@ -230,11 +228,11 @@ public:
 
     /// @brief Used to receive messages from the set endpoint (used only in SUBSCRIBE mode)
     /// @param topic - out - received topic as an std::string
-    /// @param message - out - received message as a std::array<uint8_t, N>
+    /// @param message - out - pointer to the received message data
+    /// @param message_size - in - the actual size of the data to store
     /// @param blocking - in / opt - true will block and wait for message, false by default for instant return
-    /// @return number bytes read on successful read, else -1.
-    template <std::size_t N>
-    [[nodiscard]] int ReceiveMessage(std::string& topic, std::array<uint8_t, N>& message, bool blocking = false)
+    /// @return number of bytes read on successful read, else -1.
+    [[nodiscard]] int ReceiveMessage(std::string& topic, uint8_t* message, const std::size_t message_size, const bool blocking = false)
     {
         std::scoped_lock lock(m_SubMutex);
         if (!m_SubSocket)
@@ -248,26 +246,21 @@ public:
             zmq::recv_flags flags = blocking ? zmq::recv_flags::none : zmq::recv_flags::dontwait;
 
             zmq::message_t topic_msg, data_msg;
-            if (m_SubSocket->recv(topic_msg, flags) &&
+            if (m_SubSocket->recv(topic_msg, flags) && 
                 m_SubSocket->recv(data_msg, zmq::recv_flags::none))
             {
                 topic.assign(static_cast<char*>(topic_msg.data()), topic_msg.size());
 
-                // Ensure the data fits in the fixed-size array
-                if (data_msg.size() > N)
+                // Ensure the received message size doesn't exceed the provided buffer
+                if (data_msg.size() > message_size)
                 {
-                    LogError("Received message size exceeds std::array capacity");
+                    LogError("Received message size exceeds provided buffer size");
                     return -1;
                 }
 
-                // Copy data into the std::array
-                std::memcpy(message.data(), data_msg.data(), data_msg.size());
+                // Copy data into the message buffer
+                std::memcpy(message, data_msg.data(), data_msg.size());
 
-                // Fill any unused portion of the array with zeroes
-                if (data_msg.size() < N)
-                {
-                    std::fill(message.begin() + data_msg.size(), message.end(), 0);
-                }
 
                 return data_msg.size();
             }
