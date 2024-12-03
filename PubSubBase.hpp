@@ -479,7 +479,6 @@ private:
         return static_cast<int>(data_size);
     }
 
-
     /// @brief Logs an error message. By default, prints to std::cerr if user has not passed in a callback 
     /// @param message - Message to be logged
     void LogError(const std::string& errorMessage) 
