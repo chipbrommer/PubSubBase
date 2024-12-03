@@ -176,26 +176,16 @@ public:
             return false;
         }
 
-        if (topic.empty())
+        if (topic.empty() || message_size <= 0)
         {
-            LogError("SendMessage() called with an empty topic");
-            return false;
-        }
-
-        if (message_size <= 0)
-        {
-            LogError("SendMessage() called with an empty message");
+            LogError("SendMessage() called with invalid topic or message size");
             return false;
         }
 
         try
         {
-            zmq::message_t topic_msg(topic.data(), topic.size());
-            zmq::message_t data_msg(message, message_size);
-
-            m_PubSocket->send(topic_msg, zmq::send_flags::sndmore);
-            m_PubSocket->send(data_msg, zmq::send_flags::none);
-
+            zmq::message_t encoded_message = EncodeMessage(topic, message, message_size);
+            m_PubSocket->send(encoded_message, zmq::send_flags::none);
             return true;
         }
         catch (const zmq::error_t& e)
@@ -245,24 +235,10 @@ public:
         {
             zmq::recv_flags flags = blocking ? zmq::recv_flags::none : zmq::recv_flags::dontwait;
 
-            zmq::message_t topic_msg, data_msg;
-            if (m_SubSocket->recv(topic_msg, flags) && 
-                m_SubSocket->recv(data_msg, zmq::recv_flags::none))
+            zmq::message_t encoded_message;
+            if (m_SubSocket->recv(encoded_message, flags))
             {
-                topic.assign(static_cast<char*>(topic_msg.data()), topic_msg.size());
-
-                // Ensure the received message size doesn't exceed the provided buffer
-                if (data_msg.size() > message_size)
-                {
-                    LogError("Received message size exceeds provided buffer size");
-                    return -1;
-                }
-
-                // Copy data into the message buffer
-                std::memcpy(message, data_msg.data(), data_msg.size());
-
-
-                return data_msg.size();
+                return DecodeMessage(encoded_message, topic, message, message_size);
             }
         }
         catch (const zmq::error_t& e)
@@ -430,38 +406,79 @@ public:
     }
 
 private:
-    /// @brief Encodes a topic and message into a single message for transmition.
-    /// @param topic - topic for the message
-    /// @param message - message to be sent
-    /// @return - Encoded message as a uint8_t vector
-    std::vector<uint8_t> EncodeMessage(std::string_view topic, std::string_view message)
+    /// @brief Encodes the topic and data into a single message.
+    /// @param topic - topic as a string_view.
+    /// @param message - pointer to the message data.
+    /// @param message_size - size of the message data.
+    /// @return zmq::message_t containing the encoded topic and data.
+    zmq::message_t EncodeMessage(std::string_view topic, const uint8_t* message, std::size_t message_size)
     {
-        std::string combined = std::string(topic) + ":" + std::string(message);
-        return { combined.begin(), combined.end() };
+        // Calculate total size: topic size + size to store the topic length + message size
+        std::size_t total_size = sizeof(std::size_t) + topic.size() + message_size;
+
+        zmq::message_t encoded_message(total_size);
+        auto* data_ptr = static_cast<uint8_t*>(encoded_message.data());
+
+        // Encode the topic size
+        std::size_t topic_size = topic.size();
+        std::memcpy(data_ptr, &topic_size, sizeof(std::size_t));
+        data_ptr += sizeof(std::size_t);
+
+        // Encode the topic
+        std::memcpy(data_ptr, topic.data(), topic.size());
+        data_ptr += topic.size();
+
+        // Encode the message data
+        std::memcpy(data_ptr, message, message_size);
+
+        return encoded_message;
     }
 
-    /// @brief Decodes a received message from the subscriber socket. 
-    /// @param encodedMessage received encoded message
-    /// @return topic, message pair
-    std::pair<std::string, std::string> DecodeMessage(const std::vector<uint8_t>& encodedMessage)
+    /// @brief Decodes a single message into a topic and data.
+    /// @param encoded_message - the received zmq::message_t.
+    /// @param topic - out - extracted topic.
+    /// @param message - out - buffer to hold the extracted data.
+    /// @param message_size - in - size of the buffer.
+    /// @return number of bytes of the decoded message, or -1 on failure.
+    int DecodeMessage(const zmq::message_t& encoded_message, std::string& topic, uint8_t* message, std::size_t message_size)
     {
-        // Convert the vector to a string
-        std::string combined(encodedMessage.begin(), encodedMessage.end());
+        auto* data_ptr = static_cast<const uint8_t*>(encoded_message.data());
+        const std::size_t total_size = encoded_message.size();
 
-        // Find the delimiter (e.g., ':')
-        size_t delimiterPos = combined.find(':');
-        if (delimiterPos == std::string::npos) 
+        // Decode the topic size
+        if (total_size < sizeof(std::size_t))
         {
-            // Return empty strings on invalid format
-            return {};
+            LogError("Encoded message is too small to contain topic size");
+            return -1;
         }
 
-        // Split the string into topic and message
-        std::string topic = combined.substr(0, delimiterPos);
-        std::string message = combined.substr(delimiterPos + 1);
+        std::size_t topic_size;
+        std::memcpy(&topic_size, data_ptr, sizeof(std::size_t));
+        data_ptr += sizeof(std::size_t);
 
-        return { topic, message };
+        // Validate the total size
+        if (total_size < sizeof(std::size_t) + topic_size)
+        {
+            LogError("Encoded message is too small to contain topic data");
+            return -1;
+        }
+
+        // Decode the topic
+        topic.assign(reinterpret_cast<const char*>(data_ptr), topic_size);
+        data_ptr += topic_size;
+
+        // Decode the message
+        std::size_t data_size = total_size - (sizeof(std::size_t) + topic_size);
+        if (data_size > message_size)
+        {
+            LogError("Decoded message size exceeds provided buffer size");
+            return -1;
+        }
+
+        std::memcpy(message, data_ptr, data_size);
+        return static_cast<int>(data_size);
     }
+
 
     /// @brief Logs an error message. By default, prints to std::cerr if user has not passed in a callback 
     /// @param message - Message to be logged
